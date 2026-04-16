@@ -37,6 +37,12 @@ export interface LinkedInLeadElement {
   openToOpportunities?: boolean
   profilePictureDisplayImage?: LeadProfilePicture
   currentPositions?: LeadPosition[]
+  // enriched in Phase 2 from contactInfo
+  email?: string
+  phone?: string
+  // connection status
+  degree?: number
+  pendingInvitation?: boolean
 }
 
 export interface MappedLead {
@@ -46,12 +52,15 @@ export interface MappedLead {
   job_title: string
   location: string
   country: string
+  email: string
+  phone: string
   salesNavigatorUrl: string
   linkedUrl: string
   company_name: string
   company_linkedin: string
   premium: string
   openToWork: string
+  connectStatus: string
   occupation: string
   profilePicture: string
   entityUrn: string
@@ -78,7 +87,12 @@ export interface CompanyElement {
   companyName?: string
   entityUrn?: string
   employeeCount?: number
-  employeeCountRange?: { start?: number; end?: number }
+  // list result may return range as object {start,end} or as a display string
+  employeeCountRange?: { start?: number; end?: number } | string
+  // pre-formatted display string, e.g. "51-200 employees"
+  employeeDisplayCount?: string
+  // list result returns industry as plain string (same as old JS el.industry)
+  industry?: string
   industries?: Array<{ localizedName?: string }>
   headquartersLocation?: {
     city?: string
@@ -100,21 +114,30 @@ export interface CompanyDetail {
   description?: string
   website?: string
   phone?: string
+  // salesApiCompanies actual field names (verified from working old JS)
+  yearFounded?: number
+  industry?: string
+  location?: string
+  headquarters?: { city?: string; geographicArea?: string; country?: string }
+  revenueRange?: {
+    estimatedMinRevenue?: { amount?: string; unit?: string; currencyCode?: string }
+    estimatedMaxRevenue?: { amount?: string; unit?: string; currencyCode?: string }
+  }
+  specialties?: string[]
+  type?: string
+  // fallback field names (kept for safety)
   foundedOn?: { year?: number }
   employeeCount?: number
-  employeeCountRange?: { start?: number; end?: number }
+  employeeCountRange?: { start?: number; end?: number } | string
   industries?: Array<{ localizedName?: string }>
-  headquartersLocation?: {
-    city?: string
-    geographicArea?: string
-    country?: string
-  }
+  headquartersLocation?: { city?: string; geographicArea?: string; country?: string }
   linkedInUrl?: string
   flagshipCompanyUrl?: string
   revenue?: { amount?: string; currencyCode?: string }
 }
 
-export interface MappedCompany {
+// Raw company data từ LinkedIn — không có score
+export interface RawCompany {
   company_name: string
   company_linkedin: string
   website: string
@@ -130,6 +153,16 @@ export interface MappedCompany {
   revenue: string
   entityUrn: string
   importDate: string
+}
+
+// Scored = raw + ICP score fields
+export interface MappedCompany extends RawCompany {
+  icp_bucket: string
+  score_total: number
+  tier: string
+  score_reason_1: string
+  score_reason_2: string
+  score_reason_3: string
 }
 
 export interface CompanyCrawlProgress {

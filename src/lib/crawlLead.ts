@@ -88,9 +88,10 @@ export async function findLatestLeadSearchQuery(): Promise<string> {
   return query
 }
 
-// ── decoration ─────────────────────────────────────────────────────────────
+// ── flagship profile (includes contactInfo for email/phone) ────────────────
 
-const DECORATION =
+// Decoration for salesApiProfiles — includes contactInfo to extract email & phone
+const PROFILE_DECORATION =
   '%28entityUrn%2CobjectUrn%2CfirstName%2ClastName%2CfullName'
   + '%2Cheadline%2Cpronoun%2Cdegree%2CprofileUnlockInfo%2Clocation'
   + '%2ClistCount%2Csummary%2CsavedLead%2CdefaultPosition%2CcontactInfo'
@@ -107,21 +108,34 @@ function parseEntityUrn(entityUrn: string) {
   return { profileId: m[1], authType: m[2], authToken: m[3] }
 }
 
-export async function fetchFlagshipUrl(entityUrn: string, session: Session): Promise<string> {
+interface FlagshipProfile { flagshipProfileUrl: string; email: string; phone: string }
+
+export async function fetchFlagshipProfile(entityUrn: string, session: Session): Promise<FlagshipProfile> {
+  const empty: FlagshipProfile = { flagshipProfileUrl: '', email: '', phone: '' }
   const parsed = parseEntityUrn(entityUrn)
-  if (!parsed) return ''
+  if (!parsed) return empty
   const { profileId, authType, authToken } = parsed
   const url = 'https://www.linkedin.com/sales-api/salesApiProfiles/'
     + `(profileId:${profileId},authType:${authType},authToken:${authToken})`
-    + `?decoration=${DECORATION}`
+    + `?decoration=${PROFILE_DECORATION}`
   try {
     const res = await fetch(url, { headers: buildHeaders(session), credentials: 'include' })
-    if (!res.ok) { WARN(`flagship HTTP ${res.status}`); return '' }
-    const data = await res.json() as { flagshipProfileUrl?: string }
-    return data.flagshipProfileUrl ?? ''
+    if (!res.ok) { WARN(`flagship HTTP ${res.status}`); return empty }
+    const data = await res.json() as {
+      flagshipProfileUrl?: string
+      contactInfo?: {
+        emailAddresses?: Array<{ emailAddress?: string }>
+        phoneNumbers?:   Array<{ number?: string }>
+      }
+    }
+    return {
+      flagshipProfileUrl: data.flagshipProfileUrl ?? '',
+      email: data.contactInfo?.emailAddresses?.[0]?.emailAddress ?? '',
+      phone: data.contactInfo?.phoneNumbers?.[0]?.number ?? '',
+    }
   } catch (e) {
     WARN('flagship err:', String(e).slice(0, 40))
-    return ''
+    return empty
   }
 }
 
@@ -149,6 +163,7 @@ export function mapLead(el: LinkedInLeadElement, index?: number): MappedLead {
     el.profilePictureDisplayImage?.artifacts?.[0]
   const profilePictureUrl = artifact
     ? (el.profilePictureDisplayImage?.rootUrl ?? '') + artifact.fileIdentifyingUrlPathSegment : ''
+
   return {
     firstName:         el.firstName ?? '',
     lastName:          el.lastName ?? '',
@@ -158,12 +173,17 @@ export function mapLead(el: LinkedInLeadElement, index?: number): MappedLead {
     country:           el.geoRegion?.includes(',')
                          ? (el.geoRegion.split(',').pop()?.trim() ?? el.geoRegion)
                          : el.geoRegion ?? '',
+    email:             el.email ?? '',
+    phone:             el.phone ?? '',
     salesNavigatorUrl: salesNavUrl,
     linkedUrl:         el.flagshipProfileUrl ?? '',
     company_name:      pos.companyName ?? '',
     company_linkedin:  companyId ? 'https://www.linkedin.com/company/' + companyId : '',
     premium:           el.premium ? 'true' : 'false',
     openToWork:        el.openToOpportunities ? 'true' : 'false',
+    connectStatus:     el.degree === 1      ? 'connected'
+                     : el.pendingInvitation ? 'pending'
+                     : 'not_connected',
     occupation:        el.summary?.split('\n')[0]?.slice(0, 100) ?? '',
     profilePicture:    profilePictureUrl,
     entityUrn:         el.entityUrn ?? '',
@@ -190,7 +210,6 @@ export function exportCSV(leads: MappedLead[]): void {
   if (!leads.length) return
   const csv      = buildCSV(leads)
   const filename = 'linkedin_leads_' + Date.now() + '.csv'
-  // Send CSV to popup — user clicks download icon to trigger save
   chrome.runtime.sendMessage({ type: 'CRAWL_LEAD_CSV', csv, filename, count: leads.length })
 }
 
@@ -238,12 +257,15 @@ export async function fetchAllLeads(onProgress: ProgressCallback): Promise<Mappe
 
   LOG(`fetch done · ${allResults.length} leads`)
 
-  // ── Phase 2: enrich flagship URLs ────────────────────────────────────────
+  // ── Phase 2: enrich flagship URL + email + phone ─────────────────────────
   for (let i = 0; i < allResults.length; i++) {
     const el = allResults[i]
     if (el.entityUrn) {
-      el.flagshipProfileUrl = await fetchFlagshipUrl(el.entityUrn, session)
-      LOG(`[${i + 1}] ${el.flagshipProfileUrl ? liPath(el.flagshipProfileUrl) : '(no url)'}`)
+      const profile = await fetchFlagshipProfile(el.entityUrn, session)
+      el.flagshipProfileUrl = profile.flagshipProfileUrl
+      el.email = profile.email
+      el.phone = profile.phone
+      LOG(`[${i + 1}] ${profile.flagshipProfileUrl ? liPath(profile.flagshipProfileUrl) : '(no url)'}${profile.email ? ' · ' + profile.email : ''}`)
     } else {
       WARN(`[${i + 1}] no urn`)
     }

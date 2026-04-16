@@ -1,7 +1,7 @@
 // src/lib/crawlCompany.ts
-import { getSessionFromBrowser, buildHeaders, buildCSV, sendDownload } from './crawlLead'
+import { getSessionFromBrowser, buildHeaders, buildCSV } from './crawlLead'
 import type {
-  Session, CompanyElement, CompanyDetail, MappedCompany, CompanyCrawlProgress,
+  Session, CompanyElement, CompanyDetail, RawCompany, CompanyCrawlProgress,
 } from './types'
 import { makeLogger } from './logger'
 
@@ -52,74 +52,102 @@ export async function findLatestAccountSearchQuery(): Promise<string> {
 
 // ── detail fetch ───────────────────────────────────────────────────────────
 
+// Exact decoration from confirmed-working old JS — field names match salesApiCompanies response:
+// industry (string), headquarters, yearFounded, revenueRange
+const DETAIL_DECORATION =
+  '%28entityUrn%2Cname%2Caccount%28saved%2CnoteCount%2ClistCount%2CcrmStatus%2Cstarred%29'
+  + '%2CpictureInfo%2CcompanyPictureDisplayImage%2CcompanyBackgroundCoverImage'
+  + '%2Cdescription%2Cindustry%2Clocation%2Cheadquarters%2Cwebsite%2CrevenueRange'
+  + '%2CcrmOpportunities%2CflagshipCompanyUrl%2CemployeeGrowthPercentages'
+  + '%2Cemployees*~fs_salesProfile%28entityUrn%2CfirstName%2ClastName%2CfullName'
+  + '%2CpictureInfo%2CprofilePictureDisplayImage%29%2Cspecialties%2Ctype%2CyearFounded%29'
+
 export async function getInformationDetail(
   companyId: string,
   session: Session
 ): Promise<CompanyDetail | null> {
   const url = `https://www.linkedin.com/sales-api/salesApiCompanies/${companyId}`
-    + `?decoration=%28entityUrn%2CcompanyName%2Cdescription%2Cwebsite%2Cphone`
-    + `%2CfoundedOn%2CemployeeCount%2CemployeeCountRange%2Cindustries`
-    + `%2CheadquartersLocation%2CflagshipCompanyUrl%2Crevenue%29`
+    + `?decoration=${DETAIL_DECORATION}`
   try {
     const res = await fetch(url, { headers: buildHeaders(session), credentials: 'include' })
-    if (!res.ok) return null
+    if (!res.ok) {
+      WARN(`detail HTTP ${res.status} · companyId=${companyId}`)
+      return null
+    }
     return await res.json() as CompanyDetail
-  } catch {
+  } catch (e) {
+    WARN(`detail err · companyId=${companyId}:`, String(e).slice(0, 40))
     return null
   }
 }
 
 // ── mappers ────────────────────────────────────────────────────────────────
 
-export function mapCompany(el: CompanyElement): MappedCompany {
+export function mapCompany(el: CompanyElement): RawCompany {
   const companyId = el.entityUrn?.split(':').pop() ?? ''
-  const logo      = el.companyPictureDisplayImage?.artifacts?.[0]
-  void logo // reserved for future use
   return {
-    company_name:    el.companyName ?? '',
-    company_linkedin: companyId
-      ? 'https://www.linkedin.com/company/' + companyId : '',
-    website:         el.website ?? '',
-    industry:        el.industries?.[0]?.localizedName ?? '',
-    employee_count:  String(el.employeeCount ?? ''),
-    employee_range:  el.employeeCountRange
-      ? `${el.employeeCountRange.start ?? ''}-${el.employeeCountRange.end ?? ''}`
-      : '',
-    city:            el.headquartersLocation?.city ?? '',
-    region:          el.headquartersLocation?.geographicArea ?? '',
-    country:         el.headquartersLocation?.country ?? '',
-    description:     el.description?.slice(0, 200) ?? '',
-    phone:           '',
-    founded_year:    '',
-    revenue:         '',
-    entityUrn:       el.entityUrn ?? '',
-    importDate:      new Date().toISOString().split('T')[0],
+    company_name:     el.companyName ?? '',
+    company_linkedin: companyId ? 'https://www.linkedin.com/company/' + companyId : '',
+    website:          el.website ?? '',
+    // list result may return industry as string (old JS) or industries array
+    industry:         el.industry ?? el.industries?.[0]?.localizedName ?? '',
+    employee_count:   String(el.employeeCount ?? ''),
+    // employeeCountRange may be a pre-formatted string or {start,end} object
+    employee_range:   el.employeeDisplayCount
+      ?? (typeof el.employeeCountRange === 'string'
+          ? el.employeeCountRange
+          : (el.employeeCountRange
+              ? `${el.employeeCountRange.start ?? ''}-${el.employeeCountRange.end ?? ''}`
+              : '')),
+    city:             el.headquartersLocation?.city ?? '',
+    region:           el.headquartersLocation?.geographicArea ?? '',
+    country:          el.headquartersLocation?.country ?? '',
+    description:      el.description?.slice(0, 200) ?? '',
+    phone:            '',
+    founded_year:     '',
+    revenue:          '',
+    entityUrn:        el.entityUrn ?? '',
+    importDate:       new Date().toISOString().split('T')[0],
   }
 }
 
-export function mapDetail(detail: CompanyDetail | null): Partial<MappedCompany> {
+export function mapDetail(detail: CompanyDetail | null): Partial<RawCompany> {
   if (!detail) return {}
-  return {
-    website:        detail.website ?? '',
-    phone:          detail.phone ?? '',
-    founded_year:   String(detail.foundedOn?.year ?? ''),
-    description:    detail.description?.slice(0, 200) ?? '',
-    employee_count: String(detail.employeeCount ?? ''),
-    employee_range: detail.employeeCountRange
-      ? `${detail.employeeCountRange.start ?? ''}-${detail.employeeCountRange.end ?? ''}`
-      : '',
-    city:           detail.headquartersLocation?.city ?? '',
-    region:         detail.headquartersLocation?.geographicArea ?? '',
-    country:        detail.headquartersLocation?.country ?? '',
-    revenue:        detail.revenue
-      ? `${detail.revenue.amount ?? ''} ${detail.revenue.currencyCode ?? ''}`.trim()
-      : '',
+
+  // revenueRange: "10M - 50M USD" format (old JS structure)
+  const revMin = detail.revenueRange?.estimatedMinRevenue
+  const revMax = detail.revenueRange?.estimatedMaxRevenue
+  const revenue = (revMin && revMax)
+    ? `${revMin.amount ?? ''}${revMin.unit ?? ''} - ${revMax.amount ?? ''}${revMax.unit ?? ''} ${revMin.currencyCode ?? ''}`.trim()
+    : (detail.revenue ? `${detail.revenue.amount ?? ''} ${detail.revenue.currencyCode ?? ''}`.trim() : '')
+
+  // headquarters: old JS uses { city, geographicArea?, country }
+  const hq = detail.headquarters ?? detail.headquartersLocation
+
+  const out: Partial<RawCompany> = {
+    website:      detail.website      ?? '',
+    phone:        detail.phone        ?? '',
+    industry:     detail.industry ?? detail.industries?.[0]?.localizedName ?? '',
+    founded_year: String(detail.yearFounded ?? detail.foundedOn?.year ?? ''),
+    description:  detail.description?.slice(0, 200) ?? '',
+    city:         hq?.city          ?? '',
+    region:       hq?.geographicArea ?? '',
+    country:      hq?.country        ?? '',
+    revenue,
   }
+  // Only override employee fields if detail actually has them (avoid wiping list-result values)
+  if (detail.employeeCount != null)
+    out.employee_count = String(detail.employeeCount)
+  if (detail.employeeCountRange != null)
+    out.employee_range = typeof detail.employeeCountRange === 'string'
+      ? detail.employeeCountRange
+      : `${detail.employeeCountRange.start ?? ''}-${detail.employeeCountRange.end ?? ''}`
+  return out
 }
 
 // ── csv export ─────────────────────────────────────────────────────────────
 
-function exportCSV(companies: MappedCompany[]): void {
+function exportRawCSV(companies: RawCompany[]): void {
   if (!companies.length) return
   const csv      = buildCSV(companies)
   const filename = 'linkedin_companies_' + Date.now() + '.csv'
@@ -134,7 +162,7 @@ export async function fetchAllCompanies(
   onProgress: ProgressCallback,
   startIdx?: number,
   endIdx?: number
-): Promise<MappedCompany[]> {
+): Promise<RawCompany[]> {
   if (startIdx !== undefined && endIdx !== undefined && startIdx >= endIdx)
     throw new Error('startIdx must be < endIdx')
 
@@ -145,9 +173,9 @@ export async function fetchAllCompanies(
   const fetchStart = startIdx !== undefined ? Math.floor(startIdx / COUNT) * COUNT : 0
   let start        = fetchStart
   const allResults: CompanyElement[] = []
-  let totalFound   = 0
+  let totalFound: number | null = null
 
-  // Phase 1: fetch pages
+  // ── Phase 1: fetch pages ──────────────────────────────────────────────────
   while (true) {
     const url =
       'https://www.linkedin.com/sales-api/salesApiAccountSearch'
@@ -165,18 +193,17 @@ export async function fetchAllCompanies(
 
     const data = await res.json() as { paging?: { total: number }; elements?: CompanyElement[] }
 
-    if (totalFound === 0) {
+    if (totalFound === null) {
       totalFound = data.paging?.total ?? 0
       LOG(`total: ${totalFound} companies`)
     }
 
-    // verbose F12 only
+    // verbose F12 only — log first page keys
     if (start === fetchStart && (data.elements?.length ?? 0) > 0) {
       console.debug('[CL:co] co[0] keys:', Object.keys(data.elements![0] as object))
     }
 
     const elements = data.elements ?? []
-
     elements.forEach((el, i) => { el._absIndex = start + i })
     allResults.push(...elements)
 
@@ -196,9 +223,10 @@ export async function fetchAllCompanies(
   let finalResults = allResults
   if (startIdx !== undefined) finalResults = finalResults.filter(el => (el._absIndex ?? 0) >= startIdx)
   if (endIdx   !== undefined) finalResults = finalResults.filter(el => (el._absIndex ?? 0) <  endIdx)
+  LOG(`after slice: ${finalResults.length} companies`)
 
-  // ── Phase 2: enrich detail ───────────────────────────────────────────────
-  const enriched: MappedCompany[] = []
+  // ── Phase 2: enrich detail ────────────────────────────────────────────────
+  const enriched: RawCompany[] = []
   for (let i = 0; i < finalResults.length; i++) {
     const el        = finalResults[i]
     const base      = mapCompany(el)
@@ -206,17 +234,22 @@ export async function fetchAllCompanies(
     let detail: CompanyDetail | null = null
     if (companyId) {
       detail = await getInformationDetail(companyId, session)
-      LOG(`[${i + 1}] ${base.company_name.slice(0, 22)}`)
+      LOG(`[${i + 1}/${finalResults.length}] ${base.company_name.slice(0, 25)}${detail ? '' : ' (detail failed)'}`)
     } else {
-      WARN(`[${i + 1}] no id`)
+      WARN(`[${i + 1}] no companyId`)
     }
-    enriched.push({ ...base, ...mapDetail(detail) })
+    const merged: RawCompany = { ...base, ...mapDetail(detail) }
+    enriched.push(merged)
     onProgress({ type: 'CRAWL_COMPANY_PROGRESS', phase: 'enrich', current: i + 1, total: finalResults.length })
     await new Promise(r => setTimeout(r, 800))
   }
 
-  exportCSV(enriched)
+  // Lưu raw data vào storage để Score button dùng sau
+  chrome.storage.local.set({ lastRawCompanies: enriched })
+  LOG(`raw companies saved to storage (${enriched.length})`)
+
+  exportRawCSV(enriched)
   onProgress({ type: 'CRAWL_COMPANY_PROGRESS', phase: 'done', total: enriched.length })
-  LOG(`✓ ${enriched.length} exported`)
+  LOG(`✓ ${enriched.length} exported (raw, no score)`)
   return enriched
 }

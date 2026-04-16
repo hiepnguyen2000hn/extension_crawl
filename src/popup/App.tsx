@@ -5,7 +5,8 @@ import { checkServer, crawlUrl } from '../lib/crawlWebsite'
 
 type BtnStatus = 'idle' | 'fetching' | 'enriching' | 'done' | 'error'
 type AppTab = 'linkedin' | 'website' | 'sheet'
-type SheetMode = 'enrich' | 'linkedin'
+type SheetMode = 'enrich' | 'linkedin' | 'auto' | 'genmsg'
+type AutoAction = 'connect' | 'message'
 
 interface ProgressState {
   phase: 'fetch' | 'enrich' | 'done' | 'error'
@@ -44,6 +45,10 @@ export default function App() {
   const [rowLimit,      setRowLimit]      = useState('15')
   const [colLinkedin,   setColLinkedin]   = useState('linkedUrl')
   const [sheetStatus,   setSheetStatus]   = useState<BtnStatus>('idle')
+  const [autoAction,      setAutoAction]      = useState<AutoAction>('connect')
+  const [messageTemplate, setMessageTemplate] = useState('')
+  const [autoStatus,      setAutoStatus]      = useState<BtnStatus>('idle')
+  const [genMsgRegen,     setGenMsgRegen]     = useState(false)
 
   // ── UI state ──────────────────────────────────────────────────────────────
   const [activeTab,  setActiveTab]  = useState<AppTab>('linkedin')
@@ -103,6 +108,44 @@ export default function App() {
     if (logs.length === 0) return
     chrome.storage.local.set({ savedLogs: logs.slice(-50) })
   }, [logs])
+
+  // ── Notifications khi crawl xong ─────────────────────────────────────────
+  const prevLead    = useRef<BtnStatus>('idle')
+  const prevCompany = useRef<BtnStatus>('idle')
+  const prevSheet   = useRef<BtnStatus>('idle')
+
+  useEffect(() => {
+    const notify = (id: string, title: string, message: string) => {
+      chrome.notifications.create(id, { type: 'basic', iconUrl: 'assets/icon128.png', title, message })
+    }
+    if (prevLead.current !== leadStatus) {
+      if (leadStatus === 'done')  notify('lead-done', 'Crawl Lead ✓', `Hoàn tất ${leadProgress.total} leads`)
+      if (leadStatus === 'error') notify('lead-err',  'Crawl Lead ✗', 'Có lỗi xảy ra')
+      prevLead.current = leadStatus
+    }
+  }, [leadStatus, leadProgress.total])
+
+  useEffect(() => {
+    const notify = (id: string, title: string, message: string) => {
+      chrome.notifications.create(id, { type: 'basic', iconUrl: 'assets/icon128.png', title, message })
+    }
+    if (prevCompany.current !== companyStatus) {
+      if (companyStatus === 'done')  notify('co-done', 'Crawl Company ✓', `Hoàn tất ${companyProgress.total} companies`)
+      if (companyStatus === 'error') notify('co-err',  'Crawl Company ✗', 'Có lỗi xảy ra')
+      prevCompany.current = companyStatus
+    }
+  }, [companyStatus, companyProgress.total])
+
+  useEffect(() => {
+    const notify = (id: string, title: string, message: string) => {
+      chrome.notifications.create(id, { type: 'basic', iconUrl: 'assets/icon128.png', title, message })
+    }
+    if (prevSheet.current !== sheetStatus) {
+      if (sheetStatus === 'done')  notify('sheet-done', 'Sheet ✓', 'Crawl hoàn tất')
+      if (sheetStatus === 'error') notify('sheet-err',  'Sheet ✗', 'Có lỗi xảy ra')
+      prevSheet.current = sheetStatus
+    }
+  }, [sheetStatus])
 
   // ── Blink cursor ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -201,7 +244,7 @@ export default function App() {
     sendToTab({ type: 'START_CRAWL_COMPANY' }).catch(err => { setCompanyStatus('error'); pushLog({ level: 'error', source: 'company', text: err.message, ts: Date.now() }) })
   }, [tabId, sendToTab, pushLog])
 
-  const handleCrawlWebsite = useCallback(async () => {
+const handleCrawlWebsite = useCallback(async () => {
     const url = websiteUrl.trim()
     if (!url) return
     setWebsiteStatus('fetching')
@@ -229,18 +272,42 @@ export default function App() {
   const handleStartSheet = useCallback(() => {
     if (!sheetId.trim()) return
     setSheetStatus('fetching')
-    pushLog({ level: 'info', source: 'sheet', text: `▶ ${sheetMode === 'enrich' ? 'Full Enrich' : 'LinkedIn Posts'} — ${sheetId.slice(0, 16)}… limit=${rowLimit || 'all'}`, ts: Date.now() })
+    const modeLabel = sheetMode === 'enrich' ? 'Company' : sheetMode === 'genmsg' ? 'Gen Message' : 'LinkedIn Posts'
+    pushLog({ level: 'info', source: 'sheet', text: `▶ ${modeLabel} — ${sheetId.slice(0, 16)}… limit=${rowLimit || 'all'}`, ts: Date.now() })
     const payload = { spreadsheet_id: sheetId.trim(), gid: sheetGid ? Number(sheetGid) : null, limit: rowLimit ? Number(rowLimit) : null }
-    const msgType = sheetMode === 'enrich' ? 'START_ENRICH_SHEET' : 'START_LINKEDIN_SHEET'
-    chrome.runtime.sendMessage({ type: msgType, payload: sheetMode === 'linkedin' ? { ...payload, col_linkedin: colLinkedin } : payload })
+    const msgType = sheetMode === 'enrich' ? 'START_ENRICH_SHEET'
+                  : sheetMode === 'genmsg' ? 'START_GEN_CONNECT_MSG'
+                  : 'START_LINKEDIN_SHEET'
+    const fullPayload = sheetMode === 'linkedin' ? { ...payload, col_linkedin: colLinkedin }
+                      : sheetMode === 'genmsg'   ? { ...payload, regen: genMsgRegen }
+                      : payload
+    chrome.runtime.sendMessage({ type: msgType, payload: fullPayload })
   }, [sheetId, sheetGid, rowLimit, sheetMode, colLinkedin, pushLog])
+
+  const handleAutoAction = useCallback(() => {
+    if (!sheetId.trim()) return
+    setAutoStatus('fetching')
+    const label = autoAction === 'connect' ? 'Auto Connect' : 'Auto Message'
+    pushLog({ level: 'info', source: 'sheet', text: `▶ ${label} — ${sheetId.slice(0, 16)}… limit=${rowLimit || 'all'}`, ts: Date.now() })
+    const payload: Record<string, unknown> = {
+      spreadsheet_id: sheetId.trim(),
+      gid: sheetGid ? Number(sheetGid) : null,
+      limit: rowLimit ? Number(rowLimit) : null,
+      col_linkedin: colLinkedin,
+    }
+    if (autoAction === 'message') payload['message_template'] = messageTemplate
+    const msgType = autoAction === 'connect' ? 'START_AUTO_CONNECT' : 'START_AUTO_MESSAGE'
+    sendToTab({ type: msgType, payload })
+      .catch(err => { setAutoStatus('error'); pushLog({ level: 'error', source: 'sheet', text: err.message, ts: Date.now() }) })
+  }, [sheetId, sheetGid, rowLimit, autoAction, messageTemplate, colLinkedin, sendToTab, pushLog])
 
   // ── Computed ──────────────────────────────────────────────────────────────
   const leadBusy    = leadStatus === 'fetching' || leadStatus === 'enriching'
   const companyBusy = companyStatus === 'fetching' || companyStatus === 'enriching'
   const websiteBusy = websiteStatus === 'fetching'
   const sheetBusy   = sheetStatus === 'fetching'
-  const anyActive   = leadBusy || companyBusy || websiteBusy || sheetBusy
+  const autoBusy    = autoStatus === 'fetching'
+  const anyActive   = leadBusy || companyBusy || websiteBusy || sheetBusy || autoBusy
   const hostname = (() => { try { return new URL(tabUrl).hostname } catch { return tabUrl } })()
   const isLinkedInPage = tabUrl.includes('linkedin.com/sales')
 
@@ -323,8 +390,10 @@ export default function App() {
           <div style={s.tabPane}>
             {/* mode toggle */}
             <div style={s.segmented}>
-              <button style={{ ...s.segBtn, ...(sheetMode === 'enrich' ? s.segBtnActive : {}) }} onClick={() => setSheetMode('enrich')}>Full Enrich</button>
+              <button style={{ ...s.segBtn, ...(sheetMode === 'enrich' ? s.segBtnActive : {}) }} onClick={() => setSheetMode('enrich')}>Company</button>
               <button style={{ ...s.segBtn, ...(sheetMode === 'linkedin' ? s.segBtnActive : {}) }} onClick={() => setSheetMode('linkedin')}>LinkedIn Posts</button>
+              <button style={{ ...s.segBtn, ...(sheetMode === 'genmsg' ? s.segBtnActive : {}) }} onClick={() => setSheetMode('genmsg')}>Gen Msg</button>
+              <button style={{ ...s.segBtn, ...(sheetMode === 'auto' ? s.segBtnActive : {}) }} onClick={() => setSheetMode('auto')}>Auto</button>
             </div>
 
             {/* sheet URL paste */}
@@ -348,11 +417,51 @@ export default function App() {
               <input style={s.input} placeholder="15" value={rowLimit} onChange={e => setRowLimit(e.target.value)} />
             </div>
 
-            <CrawlButton
-              label={sheetMode === 'enrich' ? 'START ENRICH' : 'CRAWL POSTS'}
-              color="var(--accent3)" status={sheetStatus} busy={sheetBusy}
-              disabled={!sheetId.trim()} tick={tick} onClick={handleStartSheet} fullWidth
-            />
+            {sheetMode !== 'auto' && (
+              <>
+                {sheetMode === 'genmsg' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                    <label style={{ ...s.label, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <input type="checkbox" checked={genMsgRegen} onChange={e => setGenMsgRegen(e.target.checked)} />
+                      Re-generate existing
+                    </label>
+                  </div>
+                )}
+                <CrawlButton
+                  label={sheetMode === 'enrich' ? 'START COMPANY' : sheetMode === 'genmsg' ? 'GEN MESSAGES' : 'CRAWL POSTS'}
+                  color="var(--accent3)" status={sheetStatus} busy={sheetBusy}
+                  disabled={!sheetId.trim()} tick={tick} onClick={handleStartSheet} fullWidth
+                />
+              </>
+            )}
+
+            {sheetMode === 'auto' && (
+              <>
+                {/* sub-toggle */}
+                <div style={{ ...s.segmented, marginBottom: 6 }}>
+                  <button style={{ ...s.segBtn, ...(autoAction === 'connect' ? s.segBtnActive : {}) }} onClick={() => setAutoAction('connect')}>Connect</button>
+                  <button style={{ ...s.segBtn, ...(autoAction === 'message' ? s.segBtnActive : {}) }} onClick={() => setAutoAction('message')}>Message</button>
+                </div>
+
+                {autoAction === 'message' && (
+                  <div style={s.fieldGroup}>
+                    <span style={s.label}>MESSAGE TEMPLATE</span>
+                    <textarea
+                      style={{ ...s.input, height: 64, resize: 'vertical' as const, fontFamily: 'inherit' }}
+                      placeholder={'Hi {{firstName}}, ...'}
+                      value={messageTemplate}
+                      onChange={e => setMessageTemplate(e.target.value)}
+                    />
+                  </div>
+                )}
+
+                <CrawlButton
+                  label={autoAction === 'connect' ? 'AUTO CONNECT' : 'AUTO MESSAGE'}
+                  color="var(--accent)" status={autoStatus} busy={autoBusy}
+                  disabled={!sheetId.trim()} tick={tick} onClick={handleAutoAction} fullWidth
+                />
+              </>
+            )}
           </div>
         )}
       </div>
@@ -518,7 +627,7 @@ const s = {
   dot:          { width: '8px', height: '8px', borderRadius: '50%', display: 'inline-block' },
   termTitle:    { flex: 1, fontSize: '9px', color: '#4a5568', letterSpacing: '2px', textAlign: 'center' as const },
   chevronBtn:   { background: 'none', border: 'none', color: '#4a5568', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '2px', flexShrink: 0, lineHeight: 1 },
-  termBody:     { maxHeight: '130px', overflowY: 'auto' as const, padding: '6px 0 4px' },
+  termBody:     { maxHeight: '260px', overflowY: 'auto' as const, padding: '6px 0 4px' },
   termLine:     { display: 'grid', gridTemplateColumns: '10px 34px 20px 1fr', gap: '6px', padding: '1px 10px', fontSize: '10px', fontFamily: 'var(--font-mono)', lineHeight: '1.7', alignItems: 'start' },
   footer:       { padding: '7px 16px', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: 'var(--text-soft)', letterSpacing: '1px' },
 }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Crawl Linked",
-  "version": "1.0.8",
+  "version": "1.1.8",
   "description": "Crawl network requests and localStorage from any page",
   "action": {
     "default_title": "Crawl Linked"
@@ -31,7 +31,8 @@
     "declarativeNetRequest",
     "declarativeNetRequestWithHostAccess",
     "downloads",
-    "sidePanel"
+    "sidePanel",
+    "notifications"
   ],
   "host_permissions": [
     "<all_urls>"

@@ -111,7 +111,7 @@ function _broadcastEnrich(msg: object) {
 
 async function _getApiUrl(): Promise<string> {
   const data = await chrome.storage.local.get(['apiUrl'])
-  return (data.apiUrl as string | undefined) ?? 'http://localhost:3006'
+  return (data.apiUrl as string | undefined) ?? (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:3006'
 }
 
 // ── LinkedIn via Chrome Tab (Chrome handles auth automatically) ───────────────
@@ -297,6 +297,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'START_LINKEDIN_SHEET') {
     // Dùng Chrome Tab thay vì Playwright — Chrome tự xử lý auth LinkedIn
     startLinkedInViaTab(message.payload).catch(console.error)
+    sendResponse({ ok: true })
+    return true
+  }
+
+  if (message.type === 'START_GEN_CONNECT_MSG') {
+    startSheetJob('gen-connect-message', message.payload).catch(console.error)
     sendResponse({ ok: true })
     return true
   }
