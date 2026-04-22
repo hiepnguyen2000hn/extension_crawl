@@ -5,6 +5,11 @@ export interface CrawlUrlResult {
   url: string
   markdown: string
   error?: string
+  tuyen_dung?: string
+  blog?: string
+  linh_vuc?: string
+  du_an_gan_nhat?: string
+  doi_tac?: string
 }
 
 export interface CrawlSheetResult {

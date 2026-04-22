@@ -1,12 +1,12 @@
 // src/popup/App.tsx
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { CrawlProgress, CrawlResult, CompanyCrawlProgress, CompanyCrawlResult, LogEntry, CrawlCSVReady } from '../lib/types'
-import { checkServer, crawlUrl } from '../lib/crawlWebsite'
+import { checkServer, crawlUrl, type CrawlUrlResult } from '../lib/crawlWebsite'
 
 type BtnStatus = 'idle' | 'fetching' | 'enriching' | 'done' | 'error'
 type AppTab = 'linkedin' | 'website' | 'sheet'
 type SheetMode = 'enrich' | 'linkedin' | 'auto' | 'genmsg'
-type AutoAction = 'connect' | 'message'
+type AutoAction = 'message' | 'connect_v2'
 
 interface ProgressState {
   phase: 'fetch' | 'enrich' | 'done' | 'error'
@@ -36,6 +36,7 @@ export default function App() {
   // ── Website tab state ─────────────────────────────────────────────────────
   const [websiteUrl,    setWebsiteUrl]    = useState('')
   const [websiteStatus, setWebsiteStatus] = useState<BtnStatus>('idle')
+  const [websiteResult, setWebsiteResult] = useState<CrawlUrlResult | null>(null)
 
   // ── Sheet tab state ───────────────────────────────────────────────────────
   const [sheetMode,     setSheetMode]     = useState<SheetMode>('enrich')
@@ -45,8 +46,9 @@ export default function App() {
   const [rowLimit,      setRowLimit]      = useState('15')
   const [colLinkedin,   setColLinkedin]   = useState('linkedUrl')
   const [sheetStatus,   setSheetStatus]   = useState<BtnStatus>('idle')
-  const [autoAction,      setAutoAction]      = useState<AutoAction>('connect')
+  const [autoAction,      setAutoAction]      = useState<AutoAction>('connect_v2')
   const [messageTemplate, setMessageTemplate] = useState('')
+  const [colMessage,       setColMessage]       = useState('message')
   const [autoStatus,      setAutoStatus]      = useState<BtnStatus>('idle')
   const [genMsgRegen,     setGenMsgRegen]     = useState(false)
 
@@ -248,12 +250,19 @@ const handleCrawlWebsite = useCallback(async () => {
     const url = websiteUrl.trim()
     if (!url) return
     setWebsiteStatus('fetching')
+    setWebsiteResult(null)
     pushLog({ level: 'info', source: 'website', text: `▶ crawling ${url}`, ts: Date.now() })
     const alive = await checkServer()
     if (!alive) { setWebsiteStatus('error'); pushLog({ level: 'error', source: 'website', text: '✗ server offline — chạy: python -m uvicorn server:app --port 3006', ts: Date.now() }); return }
     const res = await crawlUrl(url)
     if (res.ok) {
-      pushLog({ level: 'info', source: 'website', text: `✓ ${res.markdown.length} chars`, ts: Date.now() })
+      pushLog({ level: 'info', source: 'website', text: `✓ crawled ${res.markdown.length} chars`, ts: Date.now() })
+      if (res.linh_vuc)       pushLog({ level: 'info', source: 'website', text: `Lĩnh vực: ${res.linh_vuc}`, ts: Date.now() })
+      if (res.tuyen_dung)     pushLog({ level: 'info', source: 'website', text: `Tuyển dụng:\n${res.tuyen_dung}`, ts: Date.now() })
+      if (res.blog)           pushLog({ level: 'info', source: 'website', text: `Blog:\n${res.blog}`, ts: Date.now() })
+      if (res.du_an_gan_nhat) pushLog({ level: 'info', source: 'website', text: `Dự án: ${res.du_an_gan_nhat}`, ts: Date.now() })
+      if (res.doi_tac)        pushLog({ level: 'info', source: 'website', text: `Đối tác: ${res.doi_tac}`, ts: Date.now() })
+      setWebsiteResult(res)
       setWebsiteStatus('done')
     } else {
       pushLog({ level: 'error', source: 'website', text: `✗ ${res.error}`, ts: Date.now() })
@@ -287,7 +296,7 @@ const handleCrawlWebsite = useCallback(async () => {
   const handleAutoAction = useCallback(() => {
     if (!sheetId.trim()) return
     setAutoStatus('fetching')
-    const label = autoAction === 'connect' ? 'Auto Connect' : 'Auto Message'
+    const label = autoAction === 'connect_v2' ? 'Auto Connect V2' : 'Auto Message'
     pushLog({ level: 'info', source: 'sheet', text: `▶ ${label} — ${sheetId.slice(0, 16)}… limit=${rowLimit || 'all'}`, ts: Date.now() })
     const payload: Record<string, unknown> = {
       spreadsheet_id: sheetId.trim(),
@@ -295,11 +304,12 @@ const handleCrawlWebsite = useCallback(async () => {
       limit: rowLimit ? Number(rowLimit) : null,
       col_linkedin: colLinkedin,
     }
-    if (autoAction === 'message') payload['message_template'] = messageTemplate
-    const msgType = autoAction === 'connect' ? 'START_AUTO_CONNECT' : 'START_AUTO_MESSAGE'
+    if (autoAction === 'message')    payload['message_template'] = messageTemplate
+    if (autoAction === 'connect_v2') payload['col_message'] = colMessage || 'message'
+    const msgType = autoAction === 'connect_v2' ? 'START_AUTO_CONNECT_V2' : 'START_AUTO_MESSAGE'
     sendToTab({ type: msgType, payload })
       .catch(err => { setAutoStatus('error'); pushLog({ level: 'error', source: 'sheet', text: err.message, ts: Date.now() }) })
-  }, [sheetId, sheetGid, rowLimit, autoAction, messageTemplate, colLinkedin, sendToTab, pushLog])
+  }, [sheetId, sheetGid, rowLimit, autoAction, messageTemplate, colMessage, colLinkedin, sendToTab, pushLog])
 
   // ── Computed ──────────────────────────────────────────────────────────────
   const leadBusy    = leadStatus === 'fetching' || leadStatus === 'enriching'
@@ -382,6 +392,9 @@ const handleCrawlWebsite = useCallback(async () => {
                 onKeyDown={e => e.key === 'Enter' && !websiteBusy && handleCrawlWebsite()} />
             </div>
             <CrawlButton label="CRAWL WEBSITE" color="var(--accent3)" status={websiteStatus} busy={websiteBusy} disabled={!websiteUrl.trim()} tick={tick} onClick={handleCrawlWebsite} fullWidth />
+            {websiteStatus !== 'idle' && (
+              <WebsiteProgressPanel status={websiteStatus} result={websiteResult} />
+            )}
           </div>
         )}
 
@@ -439,9 +452,21 @@ const handleCrawlWebsite = useCallback(async () => {
               <>
                 {/* sub-toggle */}
                 <div style={{ ...s.segmented, marginBottom: 6 }}>
-                  <button style={{ ...s.segBtn, ...(autoAction === 'connect' ? s.segBtnActive : {}) }} onClick={() => setAutoAction('connect')}>Connect</button>
-                  <button style={{ ...s.segBtn, ...(autoAction === 'message' ? s.segBtnActive : {}) }} onClick={() => setAutoAction('message')}>Message</button>
+                  <button style={{ ...s.segBtn, ...(autoAction === 'connect_v2' ? s.segBtnActive : {}) }} onClick={() => setAutoAction('connect_v2')}>Connect+Msg</button>
+                  <button style={{ ...s.segBtn, ...(autoAction === 'message'    ? s.segBtnActive : {}) }} onClick={() => setAutoAction('message')}>Message</button>
                 </div>
+
+                {autoAction === 'connect_v2' && (
+                  <div style={s.fieldGroup}>
+                    <span style={s.label}>MESSAGE COLUMN</span>
+                    <input
+                      style={s.input}
+                      placeholder="message"
+                      value={colMessage}
+                      onChange={e => setColMessage(e.target.value)}
+                    />
+                  </div>
+                )}
 
                 {autoAction === 'message' && (
                   <div style={s.fieldGroup}>
@@ -456,7 +481,7 @@ const handleCrawlWebsite = useCallback(async () => {
                 )}
 
                 <CrawlButton
-                  label={autoAction === 'connect' ? 'AUTO CONNECT' : 'AUTO MESSAGE'}
+                  label={autoAction === 'connect_v2' ? 'AUTO CONNECT V2' : 'AUTO MESSAGE'}
                   color="var(--accent)" status={autoStatus} busy={autoBusy}
                   disabled={!sheetId.trim()} tick={tick} onClick={handleAutoAction} fullWidth
                 />
@@ -575,6 +600,60 @@ function ProgressPanel({ status, progress, label, color, onDownload }: {
       </div>
       <div style={s.barTrack}>
         <div style={{ ...s.barFill, width: pct + '%', background: status === 'error' ? 'var(--danger)' : color }} />
+      </div>
+    </div>
+  )
+}
+
+function buildWebsiteCsv(res: CrawlUrlResult): string {
+  const fields = ['url', 'linh_vuc', 'tuyen_dung', 'blog', 'du_an_gan_nhat', 'doi_tac'] as const
+  const header = fields.join(',')
+  const row = fields.map(f => '"' + String((res as Record<string, unknown>)[f] ?? '').replace(/"/g, '""') + '"').join(',')
+  return '﻿' + header + '\n' + row
+}
+
+function WebsiteProgressPanel({ status, result }: { status: BtnStatus; result: CrawlUrlResult | null }) {
+  const [animPct, setAnimPct] = useState(0)
+
+  useEffect(() => {
+    if (status !== 'fetching') { if (status !== 'done') setAnimPct(0); return }
+    setAnimPct(5)
+    const start = Date.now()
+    const id = setInterval(() => {
+      const elapsed = (Date.now() - start) / 1000
+      setAnimPct(Math.min(88, Math.round(5 + (elapsed / 50) * 83)))
+    }, 800)
+    return () => clearInterval(id)
+  }, [status])
+
+  const pct   = status === 'done' ? 100 : status === 'error' ? 0 : animPct
+  const color = status === 'error' ? 'var(--danger)' : 'var(--accent3)'
+  const phase = animPct < 55 ? 'crawling website…' : 'AI extracting…'
+
+  const handleDownload = () => {
+    if (!result) return
+    chrome.runtime.sendMessage({
+      type: 'DOWNLOAD_CSV',
+      content: buildWebsiteCsv(result),
+      filename: 'website_crawl_' + Date.now() + '.csv',
+    })
+  }
+
+  return (
+    <div style={s.progressPanel}>
+      <div style={s.progressHead}>
+        <span style={{ color, fontWeight: 700 }}>WEBSITE</span>
+        {status === 'fetching' && <span style={{ color: 'var(--text-soft)', fontSize: '9px' }}>{phase}</span>}
+        {status === 'error'    && <span style={{ color: 'var(--danger)',    fontSize: '9px' }}>✗ crawl failed</span>}
+        {status === 'done'     && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ color: 'var(--text-soft)', fontSize: '9px' }}>done</span>
+            {result && <button onClick={handleDownload} style={s.dlBtn}><DownloadIcon color={color} /></button>}
+          </span>
+        )}
+      </div>
+      <div style={s.barTrack}>
+        <div style={{ ...s.barFill, width: pct + '%', background: color }} />
       </div>
     </div>
   )
