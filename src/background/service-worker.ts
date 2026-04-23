@@ -44,6 +44,7 @@ async function _runSSE(endpoint: string, payload: SheetPayload) {
   _broadcastEnrich({ type: 'ENRICH_STATUS', status: 'running' })
 
   const apiUrl = await _getApiUrl()
+  const IDLE_MS = 90_000
 
   try {
     const res = await fetch(`${apiUrl}/${endpoint}`, {
@@ -58,7 +59,12 @@ async function _runSSE(endpoint: string, payload: SheetPayload) {
     let buffer = ''
 
     while (true) {
-      const { done, value } = await reader.read()
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('SSE idle timeout')), IDLE_MS)
+        ),
+      ])
       if (done) break
 
       buffer += decoder.decode(value, { stream: true })
@@ -177,6 +183,7 @@ async function startLinkedInViaTab(payload: SheetPayload) {
         col_linkedin: payload.col_linkedin ?? 'linkedUrl',
         col_name: payload.col_name ?? 'fullName',
       }),
+      signal: AbortSignal.timeout(30_000),
     })
     const { rows, total } = await rowsRes.json() as { rows: Array<{index: number; name: string; url: string; already_crawled: boolean}>; total: number }
 
@@ -215,6 +222,7 @@ async function startLinkedInViaTab(payload: SheetPayload) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, name: row.name }),
+        signal: AbortSignal.timeout(120_000), // DeepSeek có thể chậm trên AWS
       })
       const { post, ok: extractOk } = await extractRes.json() as { post: string; ok: boolean }
       log(`  Post: ${post ? post.slice(0, 80) + '…' : '(empty)'}`)
@@ -233,6 +241,7 @@ async function startLinkedInViaTab(payload: SheetPayload) {
         col_name: payload.col_name ?? 'fullName',
         results,
       }),
+      signal: AbortSignal.timeout(30_000),
     })
     const writeData = await writeRes.json() as { ok: boolean; url?: string; error?: string }
     if (writeData.ok) {

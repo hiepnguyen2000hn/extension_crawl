@@ -50,9 +50,15 @@ async function _readSSE(res: Response, onLine: (line: string) => void): Promise<
   const decoder = new TextDecoder()
   let buffer = ''
   let exitCode = 0
+  // 90s idle timeout — bắt connection chết trên AWS ALB/Nginx
+  const IDLE_MS = 90_000
 
   while (true) {
-    const { done, value } = await reader.read()
+    const readPromise = reader.read()
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('SSE idle timeout')), IDLE_MS)
+    )
+    const { done, value } = await Promise.race([readPromise, timeoutPromise])
     if (done) break
     buffer += decoder.decode(value, { stream: true })
 
@@ -95,6 +101,7 @@ export async function enrichSheetStream(
       sheet_name: opts.sheetName ?? null,
       limit: opts.limit ?? null,
     }),
+    signal: AbortSignal.timeout(1_800_000), // 30 phút
   })
   return _readSSE(res, onLine)
 }
@@ -125,6 +132,7 @@ export async function linkedinSheetStream(
       col_linkedin: opts.colLinkedin ?? 'linkedUrl',
       col_name: opts.colName ?? 'fullName',
     }),
+    signal: AbortSignal.timeout(1_800_000), // 30 phút
   })
   return _readSSE(res, onLine)
 }
